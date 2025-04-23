@@ -38,6 +38,7 @@ jobs:
                 .filter(commit => commit.author?.login)
                 .map(commit => commit.author.login)
             )];
+            const filteredCreator = commitAuthors.filter(author => author !== creator);
 
             // Handle PR assignments based on branch conditions
             if (baseBranch === 'master') {
@@ -50,16 +51,16 @@ jobs:
                 assignees: [creator]
               });
 
-              if (headBranch.startsWith('release') && commitAuthors.length > 0) {
-                console.log(`👥 Setting reviewers: ${commitAuthors.join(', ')}`);
+              if (headBranch.startsWith('release') && filteredCreator.length > 0) {
+                console.log(`👥 Setting reviewers: ${filteredCreator.join(', ')}`);
                 try {
                   // Limit reviewers to maximum allowed by GitHub (typically 10)
-                  const maxReviewers = commitAuthors.slice(0, 10);
+                  const maxReviewers = filteredCreator.slice(0, 10);
                   await github.rest.pulls.requestReviewers({
                     owner,
                     repo,
                     pull_number: prNumber,
-                    reviewers: maxReviewers
+                    reviewers: filteredCreator
                   });
                 } catch (error) {
                   console.log(`⚠️ Error requesting reviewers: ${error.message}`);
@@ -67,7 +68,7 @@ jobs:
               } else {
                 console.log("❗ No reviewers found for release branch");
               }
-            } else if (commitAuthors.length > 0) {
+            } else if (filteredCreator.length > 0) {
               // For PRs targeting non-master branches
               console.log(`📦 Assigning PR to commit authors: ${commitAuthors.join(', ')}`);
               // Limit assignees to maximum allowed by GitHub (10)
