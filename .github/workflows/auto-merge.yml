@@ -1,0 +1,97 @@
+name: Auto Merge PR
+
+on:
+  pull_request:
+    types: [labeled, opened, synchronize, reopened, ready_for_review]
+
+jobs:
+  prcheck:
+    runs-on: ubuntu-latest
+    outputs:
+      can_merge: ${{ steps.check.outputs.can_merge }}
+      merge_method: ${{ steps.check.outputs.merge_method }}
+    steps:
+      - name: Check PR status
+        id: check
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const pr = context.payload.pull_request;
+            const { owner, repo } = context.repo;
+            const prNumber = pr.number;
+
+            const baseBranch = pr.base.ref;
+            const headBranch = pr.head.ref;
+
+            // Check PR mergeability
+            const prData = await github.rest.pulls.get({
+              owner,
+              repo,
+              pull_number: prNumber
+            });
+
+            const isMergeable = prData.data.mergeable === true;
+            const mergeableState = prData.data.mergeable_state;
+
+            // Check if all required checks passed
+            const checks = await github.rest.checks.listForRef({
+              owner,
+              repo,
+              ref: pr.head.sha
+            });
+
+            const allChecksPassed = checks.data.check_runs.every(
+              check => check.conclusion === 'success'
+            );
+
+            // Check review status
+            const reviews = await github.rest.pulls.listReviews({
+              owner,
+              repo,
+              pull_number: prNumber
+            });
+
+            const latestReviews = new Map();
+            for (const review of reviews.data.reverse()) {
+              if (!latestReviews.has(review.user.login)) {
+                latestReviews.set(review.user.login, review);
+              }
+            }
+
+            const allApproved = Array.from(latestReviews.values()).every(
+              review => review.state === 'APPROVED'
+            );
+
+            const anyRequestedChanges = Array.from(latestReviews.values()).some(
+              review => review.state === 'CHANGES_REQUESTED'
+            );
+
+            const mergeMethod = baseBranch === 'master' ? 'merge' : 'squash';
+
+            const canMerge = allChecksPassed && isMergeable && allApproved && !anyRequestedChanges;
+
+            core.setOutput("can_merge", canMerge);
+            core.setOutput("merge_method", mergeMethod);
+
+            console.log(
+              🔍 PR #${prNumber}
+              ✅ Checks Passed: ${allChecksPassed}
+              ✅ Mergeable: ${isMergeable}
+              ✅ All Approved: ${allApproved}
+              ❌ Changes Requested: ${anyRequestedChanges}
+              🚀 Will Merge: ${canMerge}
+              📦 Merge Method: ${mergeMethod}
+            );
+
+  merge:
+    needs: prcheck
+    if: needs.prcheck.outputs.can_merge == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Auto merge PR
+        uses: peter-evans/merge-pull-request@v4 # or @v5.0.0 if available
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          merge-method: ${{ needs.prcheck.outputs.merge_method }}
+          delete-branch: true
