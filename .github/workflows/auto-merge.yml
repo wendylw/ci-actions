@@ -74,7 +74,7 @@ jobs:
             core.setOutput("can_merge", canMerge);
             core.setOutput("merge_method", mergeMethod);
 
-            console.log(
+            console.log(`
               🔍 PR #${prNumber}
               ✅ Checks Passed: ${allChecksPassed}
               ✅ Mergeable: ${isMergeable}
@@ -82,7 +82,7 @@ jobs:
               ❌ Changes Requested: ${anyRequestedChanges}
               🚀 Will Merge: ${canMerge}
               📦 Merge Method: ${mergeMethod}
-            );
+            `);
 
   merge:
     needs: prcheck
