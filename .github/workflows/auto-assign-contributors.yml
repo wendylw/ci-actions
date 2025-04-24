@@ -68,7 +68,7 @@ jobs:
               } else {
                 console.log("❗ No reviewers found for release branch");
               }
-            } else if (filteredCreator.length > 0) {
+            } else if (commitAuthors.length > 0) {
               // For PRs targeting non-master branches
               console.log(`📦 Assigning PR to commit authors: ${commitAuthors.join(', ')}`);
               // Limit assignees to maximum allowed by GitHub (10)
