@@ -89,9 +89,25 @@ jobs:
     if: needs.prcheck.outputs.can_merge == 'true'
     runs-on: ubuntu-latest
     steps:
-      - name: Auto merge PR
-        uses: peter-evans/merge-pull-request@v4 # or @v5.0.0 if available
-        with:
-          token: ${{ secrets.GITHUB_TOKEN }}
-          merge-method: ${{ needs.prcheck.outputs.merge_method }}
-          delete-branch: true
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Install GitHub CLI
+        run: |
+          sudo apt update
+          sudo apt install gh -y
+
+      - name: Authenticate GitHub CLI
+        run: echo "${{ secrets.GITHUB_TOKEN }}" | gh auth login --with-token
+
+      - name: Merge PR using GitHub CLI
+        env:
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          MERGE_METHOD: ${{ needs.prcheck.outputs.merge_method }}
+        run: |
+          echo "Merging PR #$PR_NUMBER with method '$MERGE_METHOD'"
+          if [ "$MERGE_METHOD" = "merge" ]; then
+            gh pr merge $PR_NUMBER --merge --delete-branch --yes
+          else
+            gh pr merge $PR_NUMBER --squash --delete-branch --yes
+          fi
