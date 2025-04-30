@@ -2,112 +2,124 @@ name: Auto Merge PR
 
 on:
   pull_request:
-    types: [labeled, opened, synchronize, reopened, ready_for_review]
+    types:
+      - opened
+      - synchronize
+      - labeled
+      - review_requested
+      - ready_for_review
+      - edited
+      - reopened
+    branches:
+      - master
+  pull_request_review:
+    types:
+      - submitted
+  check_suite:
+    types:
+      - completed
+  pull_request_target:
+    types:
+      - labeled
+
+# Authorize the workflow to use the write permissions for pull requests and contents
+permissions:
+  pull-requests: write # gh pr merge --auto need this permission
+  contents: write # gh pr merge --auto need this permission
 
 jobs:
-  prcheck:
-    runs-on: ubuntu-latest
-    outputs:
-      can_merge: ${{ steps.check.outputs.can_merge }}
-      merge_method: ${{ steps.check.outputs.merge_method }}
-    steps:
-      - name: Check PR status
-        id: check
-        uses: actions/github-script@v7
-        with:
-          github-token: ${{ secrets.GITHUB_TOKEN }}
-          script: |
-            const pr = context.payload.pull_request;
-            const { owner, repo } = context.repo;
-            const prNumber = pr.number;
-
-            const baseBranch = pr.base.ref;
-            const headBranch = pr.head.ref;
-
-            // Check PR mergeability
-            const prData = await github.rest.pulls.get({
-              owner,
-              repo,
-              pull_number: prNumber
-            });
-
-            const isMergeable = prData.data.mergeable === true;
-            const mergeableState = prData.data.mergeable_state;
-
-            // Check if all required checks passed
-            const checks = await github.rest.checks.listForRef({
-              owner,
-              repo,
-              ref: pr.head.sha
-            });
-
-            const allChecksPassed = checks.data.check_runs.every(
-              check => check.conclusion === 'success'
-            );
-
-            // Check review status
-            const reviews = await github.rest.pulls.listReviews({
-              owner,
-              repo,
-              pull_number: prNumber
-            });
-
-            const latestReviews = new Map();
-            for (const review of reviews.data.reverse()) {
-              if (!latestReviews.has(review.user.login)) {
-                latestReviews.set(review.user.login, review);
-              }
-            }
-
-            const allApproved = Array.from(latestReviews.values()).every(
-              review => review.state === 'APPROVED'
-            );
-
-            const anyRequestedChanges = Array.from(latestReviews.values()).some(
-              review => review.state === 'CHANGES_REQUESTED'
-            );
-
-            const mergeMethod = baseBranch === 'master' ? 'merge' : 'squash';
-
-            const canMerge = allChecksPassed && isMergeable && allApproved && !anyRequestedChanges;
-
-            core.setOutput("can_merge", canMerge);
-            core.setOutput("merge_method", mergeMethod);
-
-            console.log(`
-              🔍 PR #${prNumber}
-              ✅ Checks Passed: ${allChecksPassed}
-              ✅ Mergeable: ${isMergeable}
-              ✅ All Approved: ${allApproved}
-              ❌ Changes Requested: ${anyRequestedChanges}
-              🚀 Will Merge: ${canMerge}
-              📦 Merge Method: ${mergeMethod}
-            `);
-
-  merge:
-    needs: prcheck
-    if: needs.prcheck.outputs.can_merge == 'true'
+  auto-merge:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout repo
+      # Step 1: Checkout the repository
+      - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Install GitHub CLI
+      # Step 2: Check if base branch is master and head branch starts with release
+      - name: Check base and head branch
+        id: check-branches
         run: |
-          sudo apt update
-          sudo apt install gh -y
-
-      - name: Authenticate GitHub CLI
-        run: echo "${{ secrets.GITHUB_TOKEN }}" | gh auth login --with-token
-
-      - name: Merge PR using GitHub CLI
-        env:
-          PR_NUMBER: ${{ github.event.pull_request.number }}
-          MERGE_METHOD: ${{ needs.prcheck.outputs.merge_method }}
-        run: |
-          echo "Merging PR #$PR_NUMBER with method '$MERGE_METHOD'"
-          if [ "$MERGE_METHOD" = "merge" ]; then
-            gh pr merge $PR_NUMBER --merge --delete-branch --yes
-          else
-            gh pr merge $PR_NUMBER --squash --delete-branch --yes
+          if [[ "${{ github.event.pull_request.base.ref }}" != "master" ]]; then
+            echo "Base branch is not master, skipping merge."
+            exit 1
           fi
+          if [[ "${{ github.event.pull_request.head.ref }}" != "release"* ]]; then
+            echo "Head branch does not start with release, skipping merge."
+            exit 1
+          fi
+
+      # Step 3: Check if all CI checks have passed
+      - name: Check if all CI checks have passed
+        run: |
+          pr_status=$(curl -s -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
+            https://api.github.com/repos/${{ github.repository }}/pulls/${{ github.event.pull_request.number }} | \
+            jq -r '.mergeable')
+          if [[ "$pr_status" != "true" ]]; then
+            echo "PR has failed CI checks or is not mergeable, skipping merge."
+            exit 1
+          fi
+
+      # Step 4: Check if all reviews are approved
+      - name: Check if all reviews are approved
+        run: |
+          review_status=$(curl -s -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
+            https://api.github.com/repos/${{ github.repository }}/pulls/${{ github.event.pull_request.number }}/reviews)
+
+          echo "Raw review status (JSON):"
+          echo "$review_status"
+
+          pending_reviews=$(echo "$review_status" | jq '[.[] | select(.state == "CHANGES_REQUESTED")] | length')
+          approved_reviews=$(echo "$review_status" | jq '[.[] | select(.state == "APPROVED")] | length')
+          commented_reviews=$(echo "$review_status" | jq '[.[] | select(.state == "COMMENTED")] | length')
+          dismissed_reviews=$(echo "$review_status" | jq '[.[] | select(.state == "DISMISSED")] | length')
+          total_reviews=$(echo "$review_status" | jq length)
+
+          echo "Total reviews: $total_reviews"
+          echo "Approved reviews: $approved_reviews"
+          echo "Reviews requesting changes: $pending_reviews"
+          echo "Commented reviews: $commented_reviews"
+          echo "Dismissed reviews: $dismissed_reviews"
+
+          if [[ "$pending_reviews" -gt 0 ]]; then
+            echo "There are pending changes requested."
+            exit 1
+          fi
+
+          # Ensure the number of approved reviews is at least the total minus those that don't block merge
+          non_blocking_reviews=$((commented_reviews + dismissed_reviews))
+          required_approvals=$((total_reviews - non_blocking_reviews))
+
+          if [[ "$approved_reviews" -lt "$required_approvals" ]]; then
+            echo "Not enough approvals. Required: $required_approvals, Approved: $approved_reviews"
+            exit 1
+          fi
+
+          echo "All required reviews are approved."
+
+      # Step 5: Check if all requested changes are resolved
+      - name: Check if all requested changes are resolved
+        run: |
+          review_status=$(curl -s -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
+            https://api.github.com/repos/${{ github.repository }}/pulls/${{ github.event.pull_request.number }}/reviews)
+          unresolved_changes=$(echo "$review_status" | jq '[.[] | select(.state == "CHANGES_REQUESTED")] | length')
+          if [[ "$unresolved_changes" -gt 0 ]]; then
+            echo "There are unresolved changes, skipping merge."
+            exit 1
+          fi
+
+      # Step 6: Check for merge conflicts
+      - name: Check for merge conflicts
+        run: |
+          pr_mergeable=$(curl -s -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
+            https://api.github.com/repos/${{ github.repository }}/pulls/${{ github.event.pull_request.number }} | jq -r '.mergeable')
+          if [[ "$pr_mergeable" != "true" ]]; then
+            echo "There are merge conflicts, skipping merge."
+            exit 1
+          fi
+
+      # Step 7: Merge the PR if all conditions are met
+      - name: Merge PR
+        if: ${{ success() }}
+        run: gh pr merge --auto --merge "${{ github.event.pull_request.number }}"
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
